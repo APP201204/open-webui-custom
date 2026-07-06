@@ -109,6 +109,9 @@ async def compact_messages_for_request(
 
     chat_id = metadata.get('chat_id')
     checkpoint_message_id = metadata.get('user_message_id') or metadata.get('message_id')
+    # Ensure chat_id is a string
+    if isinstance(chat_id, bytes):
+        chat_id = chat_id.decode('utf-8')
     if chat_id and checkpoint_message_id and not chat_id.startswith(('local:', 'channel:')):
         await Chats.upsert_message_to_chat_by_id_and_message_id(
             chat_id,

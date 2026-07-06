@@ -49,6 +49,7 @@ from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import (
     DEVICE_TYPE,
     DOCKER,
+    ENABLE_TRANSLATION,
     RAG_EMBEDDING_TIMEOUT,
     SENTENCE_TRANSFORMERS_BACKEND,
     SENTENCE_TRANSFORMERS_CROSS_ENCODER_BACKEND,
@@ -121,6 +122,10 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import (
     calculate_sha256_string,
     sanitize_text_for_db,
+)
+from open_webui.utils.translation import (
+    detect_language,
+    translate_text,
 )
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1933,6 +1938,23 @@ async def process_file(
                         )
                     ]
                 text_content = ' '.join([doc.page_content for doc in docs])
+
+            # Translation: Detect language and translate to English before chunking/embedding
+            if ENABLE_TRANSLATION and text_content and text_content.strip():
+                detected_lang = await detect_language(text_content)
+                if detected_lang != 'en':
+                    log.info(f'Detected document language: {detected_lang}, translating to English for embedding')
+                    translated_content = await translate_text(text_content, detected_lang, 'en')
+                    # Store original untranslated content in file metadata
+                    if 'data' not in file.data:
+                        file.data = {}
+                    file.data['original_content'] = text_content
+                    file.data['original_language'] = detected_lang
+                    # Use translated content for embedding
+                    text_content = translated_content
+                    # Update docs with translated content
+                    for doc in docs:
+                        doc.page_content = translated_content
 
             log.debug(f'text_content: {text_content}')
             await Files.update_file_data_by_id(

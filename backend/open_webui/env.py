@@ -1145,3 +1145,16 @@ OTEL_METRICS_OTLP_SPAN_EXPORTER = os.getenv(
 OTEL_LOGS_OTLP_SPAN_EXPORTER = os.getenv(
     'OTEL_LOGS_OTLP_SPAN_EXPORTER', OTEL_OTLP_SPAN_EXPORTER
 ).lower()  # grpc or http
+
+
+####################################
+# TRANSLATION
+####################################
+
+TRANSLATION_MODEL_ID = os.getenv('TRANSLATION_MODEL_ID', 'gemini-3.1-flash-lite')
+
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')
+
+TRANSLATION_CACHE_TTL = int(os.getenv('TRANSLATION_CACHE_TTL', '3600'))  # 1 hour default
+
+ENABLE_TRANSLATION = os.getenv('ENABLE_TRANSLATION', 'False').lower() == 'true'

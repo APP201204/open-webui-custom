@@ -1095,15 +1095,10 @@ def stream_chunks_handler(stream: aiohttp.StreamReader):
 
     async def yield_safe_stream_chunks():
         buffer = b''
-        skip_mode = False
 
         async for data, _ in stream.iter_chunks():
             if not data:
                 continue
-
-            # In skip_mode, if buffer already exceeds the limit, clear it (it's part of an oversized line)
-            if skip_mode and len(buffer) > max_buffer_size:
-                buffer = b''
 
             lines = (buffer + data).split(b'\n')
 
@@ -1111,34 +1106,35 @@ def stream_chunks_handler(stream: aiohttp.StreamReader):
             for i in range(len(lines) - 1):
                 line = lines[i]
 
-                if skip_mode:
-                    # Skip mode: check if current line is small enough to exit skip mode
-                    if len(line) <= max_buffer_size:
-                        skip_mode = False
-                        yield line
-                    else:
-                        yield b'data: {}\n'
+                # If line exceeds limit, split it into smaller chunks
+                if len(line) > max_buffer_size:
+                    log.info(f'Large line detected, splitting into chunks. Line size: {len(line)}')
+                    # Split the line into chunks that fit within max_buffer_size
+                    for offset in range(0, len(line), max_buffer_size):
+                        chunk = line[offset:offset + max_buffer_size]
+                        yield chunk + b'\n'
                 else:
-                    # Normal mode: check if line exceeds limit
-                    if len(line) > max_buffer_size:
-                        skip_mode = True
-                        yield b'data: {}\n'
-                        log.info(f'Skip mode triggered, line size: {len(line)}')
-                    else:
-                        yield line + b'\n'
+                    yield line + b'\n'
 
             # Save the last incomplete fragment
             buffer = lines[-1]
 
-            # Check if buffer exceeds limit
-            if not skip_mode and len(buffer) > max_buffer_size:
-                skip_mode = True
-                log.info(f'Skip mode triggered, buffer size: {len(buffer)}')
-                # Clear oversized buffer to prevent unlimited growth
+            # If buffer exceeds limit, split it before yielding
+            if len(buffer) > max_buffer_size:
+                log.info(f'Large buffer detected, splitting into chunks. Buffer size: {len(buffer)}')
+                for offset in range(0, len(buffer), max_buffer_size):
+                    chunk = buffer[offset:offset + max_buffer_size]
+                    yield chunk + b'\n'
                 buffer = b''
 
         # Process remaining buffer data
-        if buffer and not skip_mode:
-            yield buffer + b'\n'
+        if buffer:
+            if len(buffer) > max_buffer_size:
+                log.info(f'Large final buffer detected, splitting into chunks. Buffer size: {len(buffer)}')
+                for offset in range(0, len(buffer), max_buffer_size):
+                    chunk = buffer[offset:offset + max_buffer_size]
+                    yield chunk + b'\n'
+            else:
+                yield buffer + b'\n'
 
     return yield_safe_stream_chunks()

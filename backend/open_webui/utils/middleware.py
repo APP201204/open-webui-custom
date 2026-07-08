@@ -793,23 +793,29 @@ async def apply_source_context_to_messages(
     (e.g. in a tool result message) and only citation markers are needed.
     """
     if not sources or not user_message:
+        log.debug(f'apply_source_context_to_messages: skipped - sources={len(sources) if sources else 0}, user_message={bool(user_message)}')
         return messages
 
     context = get_source_context(sources, include_content=include_content)
 
     context = context.strip()
     if not context:
+        log.debug(f'apply_source_context_to_messages: skipped - context empty after strip')
         return messages
+
+    log.debug(f'apply_source_context_to_messages: context length={len(context)}, sources={len(sources)}')
+    rag_content = await rag_template(await Config.get('rag.template'), context, user_message)
+    log.debug(f'apply_source_context_to_messages: rag_content length={len(rag_content)}')
 
     if RAG_SYSTEM_CONTEXT:
         return add_or_update_system_message(
-            await rag_template(await Config.get('rag.template'), context, user_message),
+            rag_content,
             messages,
             append=True,
         )
     else:
         return add_or_update_user_message(
-            await rag_template(await Config.get('rag.template'), context, user_message),
+            rag_content,
             messages,
             append=False,
         )
@@ -2821,6 +2827,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             # Always store resolved tools in metadata so downstream consumers
             # (e.g. pipe functions) can access all tools including MCP and builtins.
             metadata['tools'] = tools_dict
+            log.debug(f'Tools available: {list(tools_dict.keys())}')
 
             if metadata.get('params', {}).get('function_calling') != 'legacy':
                 # If the function calling is native, then call the tools function calling handler
@@ -2829,6 +2836,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 ]
                 if inlet_filter_tools:
                     form_data['tools'].extend(inlet_filter_tools)
+                log.debug(f'Native FC: tools passed to model: {len(form_data["tools"])} tools')
             else:
                 # If the function calling is not native, then call the tools function calling handler
                 try:
@@ -2866,8 +2874,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     metadata['sources'] = sources[:] if sources else []
 
     # If context is not empty, insert it into the messages
+    log.debug(f'RAG injection check: sources={len(sources) if sources else 0}, prompt={bool(prompt)}, prompt length={len(prompt) if prompt else 0}')
     if sources and prompt:
+        log.debug(f'Before apply_source_context_to_messages: messages count={len(form_data["messages"])}, sources={len(sources)}')
         form_data['messages'] = await apply_source_context_to_messages(request, form_data['messages'], sources, prompt)
+        log.debug(f'After apply_source_context_to_messages: messages count={len(form_data["messages"])}')
+    else:
+        log.debug(f'RAG injection skipped: sources={len(sources) if sources else 0}, prompt={bool(prompt)}')
 
     # If there are citations, add them to the data_items
     sources = [
@@ -3540,6 +3553,8 @@ async def non_streaming_chat_response_handler(response, ctx):
             choices = response_data.get('choices', [])
             response_output = response_data.get('output')
             content = choices[0].get('message', {}).get('content') if choices else ''
+
+            log.info(f'Non-streaming response: choices={len(choices)}, content={bool(content)}, response_output={bool(response_output)}, content_preview={content[:100] if content else "None"}')
 
             if choices and (content or response_output):
                 if content or response_output:
@@ -4624,18 +4639,32 @@ async def streaming_chat_response_handler(response, ctx):
                                 parts[-1]['text'] = parts[-1]['text'].strip()
 
                                 if not parts[-1]['text']:
-                                    output.pop()
+                                    # Check if output contains tool call results before removing empty message
+                                    has_tool_results = any(
+                                        item.get('type') in ('function_call', 'function_call_output')
+                                        for item in output
+                                    )
+                                    
+                                    log.info(f'Cleanup: empty message detected, has_tool_results={has_tool_results}, output length={len(output)}')
+                                    
+                                    if not has_tool_results:
+                                        log.info('Cleanup: removing empty message (no tool results)')
+                                        output.pop()
 
-                                    if not output:
-                                        output.append(
-                                            {
-                                                'type': 'message',
-                                                'id': output_id('msg'),
-                                                'status': 'in_progress',
-                                                'role': 'assistant',
-                                                'content': [{'type': 'output_text', 'text': ''}],
-                                            }
-                                        )
+                                        if not output:
+                                            output.append(
+                                                {
+                                                    'type': 'message',
+                                                    'id': output_id('msg'),
+                                                    'status': 'in_progress',
+                                                    'role': 'assistant',
+                                                    'content': [{'type': 'output_text', 'text': ''}],
+                                                }
+                                            )
+                                    else:
+                                        # Mark as completed so tool results are visible
+                                        log.info('Cleanup: preserving empty message (has tool results), marking as completed')
+                                        output[-1]['status'] = 'completed'
 
                         if output[-1].get('type') == 'reasoning':
                             reasoning_item = output[-1]
@@ -4704,13 +4733,14 @@ async def streaming_chat_response_handler(response, ctx):
                         get_content_from_message(original_system_message) if original_system_message else None
                     )
 
+                log.info(f'Tool call loop starting: tool_calls={len(tool_calls)}, CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS={CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS}')
                 while tool_calls and (
                     CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS is None
                     or tool_call_iterations < CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS
                 ):
                     tool_call_iterations += 1
-
                     response_tool_calls = tool_calls.pop(0)
+                    log.info(f'Tool call iteration {tool_call_iterations}: processing {len(response_tool_calls)} tool calls')
 
                     # Append function_call items for each tool call
                     # (Responses API already has them from streaming, so skip duplicates)
@@ -5001,6 +5031,7 @@ async def streaming_chat_response_handler(response, ctx):
                         }
                     )
 
+                    log.info(f'Tool iteration {tool_call_iterations}: Tool execution completed, calling generate_chat_completion for final response')
                     try:
                         new_form_data = {
                             **form_data,
@@ -5054,6 +5085,7 @@ async def streaming_chat_response_handler(response, ctx):
                                     }
                                 )
 
+                        log.debug(f'Tool iteration {tool_call_iterations}: Calling generate_chat_completion with {len(new_form_data.get("messages", []))} messages')
                         res = await generate_chat_completion(
                             request,
                             new_form_data,
@@ -5061,6 +5093,7 @@ async def streaming_chat_response_handler(response, ctx):
                             bypass_system_prompt=True,
                         )
 
+                        log.info(f'Tool iteration {tool_call_iterations}: generate_chat_completion returned type={type(res).__name__}, module={type(res).__module__}')
                         if isinstance(res, StreamingResponse):
                             # Save accumulated output and start fresh.
                             # Responses API output_index values are relative
@@ -5079,15 +5112,168 @@ async def streaming_chat_response_handler(response, ctx):
                             ):
                                 msg_parts = prior_output[-1].get('content', [])
                                 if not msg_parts or (len(msg_parts) == 1 and not msg_parts[0].get('text', '').strip()):
-                                    prior_output.pop()
+                                    # Check if prior_output contains tool call results before removing
+                                    has_tool_results = any(
+                                        item.get('type') in ('function_call', 'function_call_output')
+                                        for item in prior_output
+                                    )
+                                    if not has_tool_results:
+                                        prior_output.pop()
                             output = []
                             await stream_body_handler(res, new_form_data)
                             output[:0] = prior_output
                             prior_output = []
+                        elif isinstance(res, JSONResponse):
+                            # Handle JSONResponse (error or non-streaming response)
+                            try:
+                                response_data = res.body.decode('utf-8') if hasattr(res.body, 'decode') else str(res.body)
+                                response_json = json.loads(response_data) if isinstance(response_data, str) else response_data
+                                log.error(f'JSONResponse from generate_chat_completion: {json.dumps(response_json, indent=2)}')
+                                
+                                # Try to extract content from the response if it's a valid completion
+                                content = None
+                                if 'choices' in response_json and len(response_json['choices']) > 0:
+                                    content = response_json['choices'][0].get('message', {}).get('content', '')
+                                elif 'candidates' in response_json and len(response_json['candidates']) > 0:
+                                    # Google Gemini format
+                                    candidate = response_json['candidates'][0]
+                                    if 'content' in candidate:
+                                        parts = candidate['content'].get('parts', [])
+                                        content = ''.join(part.get('text', '') for part in parts)
+                                    elif 'text' in candidate:
+                                        content = candidate['text']
+                                elif 'content' in response_json:
+                                    # Direct content field
+                                    content = response_json['content']
+                                
+                                log.info(f'Extracted content: {content if content else "None"}')
+                                
+                                if content:
+                                    log.info(f'Extracted content from JSONResponse: {content[:200]}...')
+                                    # Add the content as a final message
+                                    if output and output[-1].get('type') == 'message':
+                                        output[-1]['content'] = [{'type': 'output_text', 'text': content}]
+                                        output[-1]['status'] = 'completed'
+                                    else:
+                                        output.append({
+                                            'type': 'message',
+                                            'id': output_id('msg'),
+                                            'status': 'completed',
+                                            'role': 'assistant',
+                                            'content': [{'type': 'output_text', 'text': content}],
+                                        })
+                                    await event_emitter({
+                                        'type': 'chat:completion',
+                                        'data': {'output': output},
+                                    })
+                                    break
+                                
+                                # If no valid content, emit error
+                                error_message = response_json.get('error', response_json.get('message', str(response_json)))
+                                error_content = f'Error from model: {error_message}'
+                            except Exception as e:
+                                log.exception(f'Error parsing JSONResponse: {e}')
+                                error_content = f'Failed to generate response after tool execution: {str(e)}'
+                            
+                            if not chat_id.startswith('channel:'):
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    metadata['chat_id'],
+                                    metadata['message_id'],
+                                    {'error': {'content': error_content}},
+                                )
+                            await event_emitter(
+                                {
+                                    'type': 'chat:message:error',
+                                    'data': {'error': {'content': error_content}},
+                                }
+                            )
+                            break
+                        elif isinstance(res, dict):
+                            # Handle dict response (non-streaming completion)
+                            log.debug(f'Dict response from generate_chat_completion: {res}')
+                            content = None
+                            if 'choices' in res and len(res['choices']) > 0:
+                                content = res['choices'][0].get('message', {}).get('content', '')
+                            elif 'candidates' in res and len(res['candidates']) > 0:
+                                # Google Gemini format
+                                candidate = res['candidates'][0]
+                                if 'content' in candidate:
+                                    parts = candidate['content'].get('parts', [])
+                                    content = ''.join(part.get('text', '') for part in parts)
+                                elif 'text' in candidate:
+                                    content = candidate['text']
+                            elif 'content' in res:
+                                # Direct content field
+                                content = res['content']
+                            
+                            if content:
+                                log.info(f'Extracted content from dict response: {content[:200]}...')
+                                # Add the content as a final message
+                                if output and output[-1].get('type') == 'message':
+                                    output[-1]['content'] = [{'type': 'output_text', 'text': content}]
+                                    output[-1]['status'] = 'completed'
+                                else:
+                                    output.append({
+                                        'type': 'message',
+                                        'id': output_id('msg'),
+                                        'status': 'completed',
+                                        'role': 'assistant',
+                                        'content': [{'type': 'output_text', 'text': content}],
+                                    })
+                                await event_emitter({
+                                    'type': 'chat:completion',
+                                    'data': {'output': output},
+                                })
+                                break
+                            
+                            # If no valid content, emit error
+                            error_content = 'Failed to generate response after tool execution. Please try again.'
+                            if not chat_id.startswith('channel:'):
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    metadata['chat_id'],
+                                    metadata['message_id'],
+                                    {'error': {'content': error_content}},
+                                )
+                            await event_emitter(
+                                {
+                                    'type': 'chat:message:error',
+                                    'data': {'error': {'content': error_content}},
+                                }
+                            )
+                            break
                         else:
+                            # Handle other response types
+                            log.error(f'Expected StreamingResponse after tool execution, got {type(res)}: {res}')
+                            error_content = 'Failed to generate response after tool execution. Please try again.'
+                            if not chat_id.startswith('channel:'):
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    metadata['chat_id'],
+                                    metadata['message_id'],
+                                    {'error': {'content': error_content}},
+                                )
+                            await event_emitter(
+                                {
+                                    'type': 'chat:message:error',
+                                    'data': {'error': {'content': error_content}},
+                                }
+                            )
                             break
                     except Exception as e:
-                        log.debug(e)
+                        log.exception(f'Error during tool completion iteration: {e}')
+                        # Emit an error message to the user
+                        error_content = f'Error during tool execution: {str(e)}'
+                        if not chat_id.startswith('channel:'):
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata['chat_id'],
+                                metadata['message_id'],
+                                {'error': {'content': error_content}},
+                            )
+                        await event_emitter(
+                            {
+                                'type': 'chat:message:error',
+                                'data': {'error': {'content': error_content}},
+                            }
+                        )
                         break
 
                 if (
@@ -5279,6 +5465,9 @@ async def streaming_chat_response_handler(response, ctx):
                             log.debug(e)
                             break
 
+                log.info(f'Tool call loop finished: tool_call_iterations={tool_call_iterations}, remaining tool_calls={len(tool_calls)}, output length={len(output)}')
+                if len(output) == 0:
+                    log.warning(f'Empty output detected after tool call loop. form_data messages count: {len(form_data.get("messages", []))}')
                 # Mark all in-progress items as completed
                 for item in output:
                     if item.get('status') == 'in_progress':

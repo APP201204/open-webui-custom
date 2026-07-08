@@ -16,6 +16,7 @@ from open_webui.env import (
     OFFLINE_MODE,
     PIP_OPTIONS,
     PIP_PACKAGE_INDEX_OPTIONS,
+    UV_OPTIONS,
 )
 from open_webui.models.functions import FunctionModel, Functions
 from open_webui.models.tools import Tools
@@ -427,9 +428,20 @@ def install_frontmatter_requirements(requirements: str):
                 return
 
             log.info(f'Installing requirements: {" ".join(new_reqs)}')
-            subprocess.check_call(
-                [sys.executable, '-m', 'pip', 'install'] + PIP_OPTIONS + new_reqs + PIP_PACKAGE_INDEX_OPTIONS
-            )
+            
+            # Check if uv is available and use it if possible
+            try:
+                subprocess.check_call(['uv', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # uv is available, use it
+                subprocess.check_call(
+                    ['uv', 'pip', 'install'] + UV_OPTIONS + new_reqs + PIP_PACKAGE_INDEX_OPTIONS
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # uv not available, fall back to pip
+                subprocess.check_call(
+                    [sys.executable, '-m', 'pip', 'install'] + PIP_OPTIONS + new_reqs + PIP_PACKAGE_INDEX_OPTIONS
+                )
+            
             _installed_requirements.update(new_reqs)
         except Exception as e:
             log.error(f'Error installing packages: {" ".join(new_reqs)}')

@@ -580,6 +580,7 @@ async def get_builtin_tools(
         )
 
     # Add web search tools if builtin category enabled AND enabled globally AND model has web_search capability
+    log.debug(f'Web search tool check: builtin_enabled={is_builtin_tool_enabled("web_search")}, global_enabled={config.get("web.search.enable")}, model_cap={get_model_capability("web_search")}, feature_enabled={features.get("web_search")}, user_perm={await has_user_permission("web_search")}')
     if (
         is_builtin_tool_enabled('web_search')
         and config.get('web.search.enable')
@@ -587,6 +588,7 @@ async def get_builtin_tools(
         and features.get('web_search')
         and await has_user_permission('web_search')
     ):
+        log.debug('Adding search_web and fetch_url to builtin functions')
         builtin_functions.extend([search_web, fetch_url])
 
     # Add image generation/edit tools if builtin category enabled AND enabled globally AND model has image_generation capability

@@ -577,6 +577,122 @@ export const setCodeExecutionConfig = async (token: string, config: object) => {
 	return res;
 };
 
+export const getTranslationConfig = async (token: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/translation`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getTranslationOpenAIModels = async (token: string, providerId: string) => {
+	let error = null;
+
+	const url = new URL(`${WEBUI_API_BASE_URL}/configs/translation/models/openai`);
+	if (providerId) {
+		url.searchParams.append('provider_id', providerId);
+	}
+
+	const res = await fetch(url.toString(), {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const setTranslationConfig = async (token: string, config: object) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/translation`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({
+			...config
+		})
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getTranslationModels = async (token: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/configs/translation/models`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			error = err.detail;
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const getModelsDefaults = async (token: string) => {
 	let error = null;
 

@@ -9,9 +9,18 @@ import logging
 import re
 from typing import Optional
 
+import aiohttp
 from aiocache import cached
 from google import genai
-from open_webui.env import ENABLE_TRANSLATION, GOOGLE_API_KEY, TRANSLATION_CACHE_TTL, TRANSLATION_MODEL_ID
+from open_webui.env import (
+    AIOHTTP_CLIENT_SESSION_SSL,
+    AIOHTTP_CLIENT_TIMEOUT,
+    ENABLE_TRANSLATION as DEFAULT_ENABLE_TRANSLATION,
+    GOOGLE_API_KEY,
+    TRANSLATION_CACHE_TTL as DEFAULT_TRANSLATION_CACHE_TTL,
+    TRANSLATION_MODEL_ID as DEFAULT_TRANSLATION_MODEL_ID,
+)
+from open_webui.models.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +29,122 @@ PRESERVE_INSTRUCTION = (
     "Do NOT translate numbers, dates, or proper nouns (names of people, places, "
     "organizations, brands, etc.). Preserve them exactly as they appear in the original text."
 )
+
+
+async def get_translation_config():
+    """Get translation config from database with env var fallback."""
+    config = await Config.get_many('translation.enable', 'translation.provider_id', 'translation.model_id', 'translation.cache_ttl')
+    return {
+        'ENABLE_TRANSLATION': config.get('translation.enable', DEFAULT_ENABLE_TRANSLATION),
+        'TRANSLATION_PROVIDER_ID': config.get('translation.provider_id'),
+        'TRANSLATION_MODEL_ID': config.get('translation.model_id', DEFAULT_TRANSLATION_MODEL_ID),
+        'TRANSLATION_CACHE_TTL': config.get('translation.cache_ttl', DEFAULT_TRANSLATION_CACHE_TTL),
+    }
+
+
+async def get_openai_connection(provider_id: str) -> Optional[dict]:
+    """Get OpenAI connection details for the selected provider."""
+    if not provider_id:
+        return None
+
+    try:
+        openai_config = await Config.get_many('openai.enable', 'openai.api_base_urls', 'openai.api_keys', 'openai.api_configs')
+        if not openai_config.get('openai.enable'):
+            return None
+
+        base_urls = openai_config.get('openai.api_base_urls', [])
+        api_keys = openai_config.get('openai.api_keys', [])
+        api_configs = openai_config.get('openai.api_configs', {})
+
+        # Find the index of the provider URL
+        try:
+            idx = base_urls.index(provider_id)
+            return {
+                'url': base_urls[idx],
+                'key': api_keys[idx] if idx < len(api_keys) else '',
+                'config': api_configs.get(str(idx), {})
+            }
+        except ValueError:
+            log.warning(f"Provider ID {provider_id} not found in OpenAI connections")
+            return None
+    except Exception as e:
+        log.error(f"Failed to get OpenAI connection: {e}")
+        return None
+
+
+async def translate_with_openai(
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    model_id: str,
+    config: dict,
+) -> str:
+    """Translate text using OpenAI-compatible provider.
+
+    Args:
+        text: The text to translate.
+        source_lang: Source language code (e.g., 'en', 'hi').
+        target_lang: Target language code (e.g., 'en', 'hi').
+        model_id: Model ID to use for translation.
+        config: Translation config including cache TTL.
+
+    Returns:
+        Translated text.
+    """
+    connection = await get_openai_connection(config['TRANSLATION_PROVIDER_ID'])
+    if not connection:
+        log.warning(f"Could not get OpenAI connection for provider {config['TRANSLATION_PROVIDER_ID']}")
+        return text
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
+        headers = {'Content-Type': 'application/json'}
+
+        # Add API key if available
+        if connection['key']:
+            headers['Authorization'] = f"Bearer {connection['key']}"
+
+        # Add custom headers if configured
+        if connection['config'].get('headers'):
+            headers.update(connection['config']['headers'])
+
+        # Prepare OpenAI chat completion request
+        payload = {
+            'model': model_id,
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': f"You are a translator. Translate text from {source_lang} to {target_lang}. {PRESERVE_INSTRUCTION}"
+                },
+                {
+                    'role': 'user',
+                    'content': text
+                }
+            ],
+            'temperature': 0.3
+        }
+
+        url = f"{connection['url']}/chat/completions"
+
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.post(url, json=payload, headers=headers, ssl=AIOHTTP_CLIENT_SESSION_SSL) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    log.error(f"OpenAI translation request failed: {response.status} - {error_text}")
+                    return text
+
+                result = await response.json()
+                translated = result['choices'][0]['message']['content'].strip()
+
+                # Cache the result
+                cache_key = f"trans:{_get_text_hash(text)}:{source_lang}:{target_lang}"
+                await _cache_translation(cache_key, translated, config['TRANSLATION_CACHE_TTL'])
+
+                return translated
+
+    except Exception as e:
+        log.error(f"OpenAI translation failed: {e}")
+        return text
 
 
 def _get_text_hash(text: str) -> str:
@@ -38,7 +163,8 @@ async def detect_language(text: str) -> str:
     Returns:
         ISO 639-1 language code (e.g., 'en', 'hi', 'gu').
     """
-    if not ENABLE_TRANSLATION:
+    config = await get_translation_config()
+    if not config['ENABLE_TRANSLATION']:
         return 'en'
 
     if not text or not text.strip():
@@ -51,7 +177,7 @@ async def detect_language(text: str) -> str:
     try:
         client = genai.Client(api_key=GOOGLE_API_KEY)
         response = client.models.generate_content(
-            model=TRANSLATION_MODEL_ID,
+            model=config['TRANSLATION_MODEL_ID'],
             contents=f"Detect the language of this text. Respond with only the ISO 639-1 language code (e.g., 'en', 'hi', 'gu'). Text: {text[:500]}",
         )
         detected = response.text.strip().lower()
@@ -72,7 +198,7 @@ async def translate_text(
     text: str,
     source_lang: str,
     target_lang: str,
-    model_id: str = TRANSLATION_MODEL_ID,
+    model_id: str = None,
 ) -> str:
     """Translate text from source language to target language.
 
@@ -80,12 +206,13 @@ async def translate_text(
         text: The text to translate.
         source_lang: Source language code (e.g., 'en', 'hi').
         target_lang: Target language code (e.g., 'en', 'hi').
-        model_id: Model ID to use for translation.
+        model_id: Model ID to use for translation (optional, uses config if not provided).
 
     Returns:
         Translated text.
     """
-    if not ENABLE_TRANSLATION:
+    config = await get_translation_config()
+    if not config['ENABLE_TRANSLATION']:
         return text
 
     if not text or not text.strip():
@@ -94,15 +221,23 @@ async def translate_text(
     if source_lang == target_lang:
         return text
 
-    if not GOOGLE_API_KEY:
-        log.warning("GOOGLE_API_KEY not set, returning original text")
-        return text
+    # Use provided model_id or fall back to config
+    actual_model_id = model_id if model_id else config['TRANSLATION_MODEL_ID']
 
     # Check cache first
     cache_key = f"trans:{_get_text_hash(text)}:{source_lang}:{target_lang}"
     cached_result = await _get_cached_translation(cache_key)
     if cached_result is not None:
         return cached_result
+
+    # Use OpenAI provider if selected
+    if config['TRANSLATION_PROVIDER_ID']:
+        return await translate_with_openai(text, source_lang, target_lang, actual_model_id, config)
+
+    # Fall back to Google
+    if not GOOGLE_API_KEY:
+        log.warning("GOOGLE_API_KEY not set, returning original text")
+        return text
 
     try:
         client = genai.Client(api_key=GOOGLE_API_KEY)
@@ -116,13 +251,13 @@ Text:
 Translate only the text above, do not include any explanations or additional text."""
 
         response = client.models.generate_content(
-            model=model_id,
+            model=actual_model_id,
             contents=prompt,
         )
         translated = response.text.strip()
 
         # Cache the result
-        await _cache_translation(cache_key, translated)
+        await _cache_translation(cache_key, translated, config['TRANSLATION_CACHE_TTL'])
 
         return translated
     except Exception as e:
@@ -133,7 +268,7 @@ Translate only the text above, do not include any explanations or additional tex
 async def translate_batch(
     strings: list[str],
     target_lang: str,
-    model_id: str = TRANSLATION_MODEL_ID,
+    model_id: str = None,
 ) -> list[str]:
     """Translate a batch of strings to target language in a single API call.
 
@@ -143,12 +278,13 @@ async def translate_batch(
     Args:
         strings: List of strings to translate.
         target_lang: Target language code (e.g., 'en', 'hi').
-        model_id: Model ID to use for translation.
+        model_id: Model ID to use for translation (optional, uses config if not provided).
 
     Returns:
         List of translated strings in the same order as input.
     """
-    if not ENABLE_TRANSLATION:
+    config = await get_translation_config()
+    if not config['ENABLE_TRANSLATION']:
         return strings
 
     if not strings:
@@ -161,6 +297,23 @@ async def translate_batch(
     if not non_empty_strings:
         return strings
 
+    # Use provided model_id or fall back to config
+    actual_model_id = model_id if model_id else config['TRANSLATION_MODEL_ID']
+
+    # Use OpenAI provider if selected
+    if config['TRANSLATION_PROVIDER_ID']:
+        # For OpenAI, fall back to individual translations for simplicity
+        result = []
+        for s in strings:
+            if not s or not s.strip():
+                result.append(s)
+            else:
+                detected = await detect_language(s)
+                translated = await translate_text(s, detected, target_lang, actual_model_id)
+                result.append(translated)
+        return result
+
+    # Fall back to Google
     if not GOOGLE_API_KEY:
         log.warning("GOOGLE_API_KEY not set, returning original strings")
         return strings
@@ -184,7 +337,7 @@ Text to translate:
 {numbered_text}"""
 
         response = client.models.generate_content(
-            model=model_id,
+            model=actual_model_id,
             contents=prompt,
         )
 
@@ -222,7 +375,7 @@ Text to translate:
                 result.append(s)
             else:
                 detected = await detect_language(s)
-                translated = await translate_text(s, detected, target_lang, model_id)
+                translated = await translate_text(s, detected, target_lang, actual_model_id)
                 result.append(translated)
         return result
 
@@ -239,12 +392,13 @@ async def _get_cached_translation(cache_key: str) -> Optional[str]:
         return None
 
 
-async def _cache_translation(cache_key: str, translated_text: str) -> None:
+async def _cache_translation(cache_key: str, translated_text: str, ttl: int = None) -> None:
     """Cache translation result with TTL."""
     try:
         from aiocache import Cache
         cache = Cache(Cache.MEMORY)
-        await cache.set(cache_key, translated_text, ttl=TRANSLATION_CACHE_TTL)
+        cache_ttl = ttl if ttl is not None else DEFAULT_TRANSLATION_CACHE_TTL
+        await cache.set(cache_key, translated_text, ttl=cache_ttl)
     except Exception as e:
         log.debug(f"Cache set failed: {e}")
 

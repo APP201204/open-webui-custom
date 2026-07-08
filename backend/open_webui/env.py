@@ -1042,6 +1042,7 @@ ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS = (
     os.getenv('ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS', 'True').lower() == 'true'
 )
 
+UV_OPTIONS = os.getenv('UV_OPTIONS', '').split()
 PIP_OPTIONS = os.getenv('PIP_OPTIONS', '').split()
 PIP_PACKAGE_INDEX_OPTIONS = os.getenv('PIP_PACKAGE_INDEX_OPTIONS', '').split()
 

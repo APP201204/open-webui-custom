@@ -85,6 +85,11 @@ class EventDefinitions(BaseModel):
         description='Code execution configuration was updated.',
         message='Config Code Execution updated',
     )
+    CONFIG_TRANSLATION_UPDATED: EventDefinition = EventDefinition(
+        name='config.translation.updated',
+        description='Translation configuration was updated.',
+        message='Config Translation updated',
+    )
     CONFIG_MODELS_UPDATED: EventDefinition = EventDefinition(
         name='config.models.updated', description='Model configuration was updated.', message='Config Models updated'
     )

@@ -22,6 +22,7 @@
 	import Evaluations from './Settings/Evaluations.svelte';
 	import CodeExecution from './Settings/CodeExecution.svelte';
 	import Integrations from './Settings/Integrations.svelte';
+	import Translation from './Settings/Translation.svelte';
 
 	import ChartBar from '../icons/ChartBar.svelte';
 	import DocumentChartBar from '../icons/DocumentChartBar.svelte';
@@ -46,6 +47,7 @@
 			'documents',
 			'web',
 			'code-execution',
+			'translation',
 			'interface',
 			'audio',
 			'images',
@@ -219,6 +221,12 @@
 			title: 'Code Execution',
 			route: '/admin/settings/code-execution',
 			keywords: ['code execution', 'python', 'sandbox', 'compiler', 'jupyter', 'interpreter']
+		},
+		{
+			id: 'translation',
+			title: 'Translation',
+			route: '/admin/settings/translation',
+			keywords: ['translation', 'language', 'multilingual', 'translate', 'gemini', 'google']
 		},
 		{
 			id: 'interface',
@@ -472,6 +480,19 @@
 								clip-rule="evenodd"
 							/>
 						</svg>
+					{:else if tab.id === 'translation'}
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							viewBox="0 0 16 16"
+							fill="currentColor"
+							class="w-4 h-4"
+						>
+							<path
+								fill-rule="evenodd"
+								d="M4.22 1.578a.75.75 0 0 0-1.06.02L1.476 4.5A.75.75 0 0 0 2 5.5h4.234a.75.75 0 0 0 .525-.214l2.694-2.692a.75.75 0 0 0-.02-1.06L8.22 1.578a.75.75 0 0 0-1.06.02L5.5 3.25 4.22 1.578Zm5.56 4.94 1.69-1.69a.75.75 0 0 1 1.06 0l1.69 1.69a.75.75 0 0 1 0 1.06l-1.69 1.69a.75.75 0 0 1-1.06 0l-1.69-1.69a.75.75 0 0 1 0-1.06ZM1.5 9.5a.75.75 0 0 1 .75-.75h4a.75.75 0 0 1 0 1.5h-4a.75.75 0 0 1-.75-.75Zm0 3a.75.75 0 0 1 .75-.75h4a.75.75 0 0 1 0 1.5h-4a.75.75 0 0 1-.75-.75Z"
+								clip-rule="evenodd"
+							/>
+						</svg>
 					{:else if tab.id === 'interface'}
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
@@ -597,6 +618,15 @@
 			/>
 		{:else if selectedTab === 'code-execution'}
 			<CodeExecution
+				saveHandler={async () => {
+					toast.success($i18n.t('Settings saved successfully!'));
+
+					await tick();
+					await config.set(await getBackendConfig());
+				}}
+			/>
+		{:else if selectedTab === 'translation'}
+			<Translation
 				saveHandler={async () => {
 					toast.success($i18n.t('Settings saved successfully!'));
 

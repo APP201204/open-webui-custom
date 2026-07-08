@@ -8,7 +8,14 @@ import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 from mcp.shared.auth import OAuthMetadata
 from open_webui.config import BannerModel
-from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT
+from open_webui.env import (
+    AIOHTTP_CLIENT_SESSION_SSL,
+    AIOHTTP_CLIENT_TIMEOUT,
+    ENABLE_TRANSLATION,
+    GOOGLE_API_KEY,
+    TRANSLATION_CACHE_TTL,
+    TRANSLATION_MODEL_ID,
+)
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.models.oauth_sessions import OAuthSessions
@@ -66,6 +73,12 @@ MODELS_CONFIG_KEYS = {
     'MODEL_ORDER_LIST': 'ui.model_order_list',
     'DEFAULT_MODEL_METADATA': 'models.default_metadata',
     'DEFAULT_MODEL_PARAMS': 'models.default_params',
+}
+TRANSLATION_CONFIG_KEYS = {
+    'ENABLE_TRANSLATION': 'translation.enable',
+    'TRANSLATION_PROVIDER_ID': 'translation.provider_id',
+    'TRANSLATION_MODEL_ID': 'translation.model_id',
+    'TRANSLATION_CACHE_TTL': 'translation.cache_ttl',
 }
 
 
@@ -710,6 +723,142 @@ async def set_code_execution_config(
         },
     )
     return values
+
+
+############################
+# Translation Config
+############################
+
+
+class TranslationConfigForm(BaseModel):
+    ENABLE_TRANSLATION: bool
+    TRANSLATION_PROVIDER_ID: Optional[str] = None
+    TRANSLATION_MODEL_ID: str
+    TRANSLATION_CACHE_TTL: int
+
+
+@router.get('/translation', response_model=TranslationConfigForm)
+async def get_translation_config(request: Request, user=Depends(get_admin_user)):
+    values = await Config.get_many(*TRANSLATION_CONFIG_KEYS.values())
+    return {
+        'ENABLE_TRANSLATION': values.get('translation.enable', ENABLE_TRANSLATION),
+        'TRANSLATION_PROVIDER_ID': values.get('translation.provider_id'),
+        'TRANSLATION_MODEL_ID': values.get('translation.model_id', TRANSLATION_MODEL_ID),
+        'TRANSLATION_CACHE_TTL': values.get('translation.cache_ttl', TRANSLATION_CACHE_TTL),
+    }
+
+
+@router.post('/translation', response_model=TranslationConfigForm)
+async def set_translation_config(
+    request: Request,
+    form_data: TranslationConfigForm,
+    user=Depends(get_admin_user),
+):
+    await Config.upsert(config_updates(form_data.model_dump(), TRANSLATION_CONFIG_KEYS))
+    values = await get_config_values(TRANSLATION_CONFIG_KEYS)
+    await publish_event(
+        request,
+        EVENTS.CONFIG_TRANSLATION_UPDATED,
+        actor=user,
+        subject_id='translation',
+        subject_type='config',
+        data={
+            'translation_enabled': values.get('ENABLE_TRANSLATION'),
+            'translation_provider_id': values.get('TRANSLATION_PROVIDER_ID'),
+            'translation_model_id': values.get('TRANSLATION_MODEL_ID'),
+            'translation_cache_ttl': values.get('TRANSLATION_CACHE_TTL'),
+        },
+    )
+    return values
+
+
+@router.get('/translation/models')
+async def get_translation_models(user=Depends(get_admin_user)):
+    """Fetch available Google models for translation."""
+    if not GOOGLE_API_KEY:
+        return {'models': []}
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        models = client.models.list()
+
+        # Filter for text generation models suitable for translation
+        translation_models = []
+        for model in models:
+            # Include models that support text generation
+            if 'generateContent' in model.supported_actions:
+                translation_models.append({
+                    'id': model.name,
+                    'display_name': model.display_name,
+                    'description': model.description
+                })
+
+        return {'models': translation_models}
+    except Exception as e:
+        log.error(f"Failed to fetch Google models: {e}")
+        return {'models': []}
+
+
+@router.get('/translation/models/openai')
+async def get_translation_openai_models(request: Request, user=Depends(get_admin_user)):
+    """Fetch available models from OpenAI provider for translation."""
+    try:
+        from open_webui.models.config import Config
+        import aiohttp
+
+        # Get provider_id from query parameter
+        provider_id = request.query_params.get('provider_id')
+
+        if not provider_id:
+            return {'models': []}
+
+        # Get OpenAI connection details
+        openai_config = await Config.get_many('openai.enable', 'openai.api_base_urls', 'openai.api_keys', 'openai.api_configs')
+        if not openai_config.get('openai.enable'):
+            return {'models': []}
+
+        base_urls = openai_config.get('openai.api_base_urls', [])
+        api_keys = openai_config.get('openai.api_keys', [])
+
+        # Find the index of the provider URL
+        try:
+            idx = base_urls.index(provider_id)
+            url = base_urls[idx]
+            key = api_keys[idx] if idx < len(api_keys) else ''
+        except ValueError:
+            log.warning(f"Provider ID {provider_id} not found in OpenAI connections")
+            return {'models': []}
+
+        # Fetch models from OpenAI provider
+        timeout = aiohttp.ClientTimeout(total=30)
+        headers = {'Content-Type': 'application/json'}
+        if key:
+            headers['Authorization'] = f"Bearer {key}"
+
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+            async with session.get(f"{url}/models", headers=headers, ssl=AIOHTTP_CLIENT_SESSION_SSL) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    log.error(f"Failed to fetch OpenAI models: {response.status} - {error_text}")
+                    return {'models': []}
+
+                result = await response.json()
+                models = result.get('data', [])
+
+                translation_models = []
+                for model in models:
+                    translation_models.append({
+                        'id': model.get('id'),
+                        'display_name': model.get('id'),
+                        'description': model.get('description', '')
+                    })
+
+                return {'models': translation_models}
+
+    except Exception as e:
+        log.error(f"Failed to fetch OpenAI translation models: {e}")
+        return {'models': []}
 
 
 ############################

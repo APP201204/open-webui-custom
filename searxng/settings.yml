@@ -1,0 +1,33 @@
+# Read the documentation before extending the defaults:
+# https://docs.searxng.org/admin/settings/
+
+use_default_settings: true
+
+server:
+  secret_key: "CJIU8KYARRqywtWFHTU4ITf90NeT"
+  image_proxy: true
+  reverse_proxy: false
+  x_forwarded_for: false
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
+  timeout: 10.0
+
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: ahmia
+    disabled: true
+  - name: torch
+    disabled: true
